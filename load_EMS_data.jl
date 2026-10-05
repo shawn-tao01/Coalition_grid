@@ -15,7 +15,7 @@ max_builds = 70
 
 function MPC_load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
     dd = data_dir
-    meta = CSV.read(joinpath(dd, "data/metadata.csv"), DataFrame)
+    meta = CSV.read(joinpath(dd, "synthetic_data/data/metadata.csv"), DataFrame) #30*6 each 6 feature has 30 datas
     mb = nrow(meta)
     if num_builds < 1
         num_builds = 1
@@ -28,7 +28,7 @@ function MPC_load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
     builds = Vector{MPC_Building}()
 
     for i in 1:num_builds
-        filename = joinpath(dd, "cleaned_data", string(i, ".csv"))
+        filename = joinpath(dd, "synthetic_data/cleaned_data", string(i, ".csv"))
         file = CSV.read(filename, DataFrame, delim=",")
         if num_steps > nrow(file)
             num_steps = nrow(file)
@@ -36,11 +36,11 @@ function MPC_load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
         build = MPC_Building((rand(Float64, 1)[1], rand(Float64, 1)[1]), Matrix(file[1:num_steps, Cols(x -> startswith(x, "load_"))]), Matrix(file[1:num_steps, Cols(x -> startswith(x, "pv_"))]), CSV.File(filename; select=[3]).actual_consumption_mean[1:num_steps], CSV.File(filename; select=[4]).actual_pv_mean[1:num_steps], meta[i,:capacity], meta[i,:power], meta[i,:charge_efficiency],meta[i,:discharge_efficiency],i,zeros(num_steps))
         push!(builds, build)
     end
-    filename = joinpath(dd, "cleaned_data", string(1, ".csv"))
+    filename = joinpath(dd, "synthetic_data/cleaned_data", string(1, ".csv"))
     file = CSV.read(filename, DataFrame, delim=",")
     start = split(split(file[1,:DateTime],"+")[1], "T")[2]
 
-    price_file = CSV.read(joinpath(dd, "data/edf_prices.csv"), DataFrame)
+    price_file = CSV.read(joinpath(dd, "synthetic_data/data/edf_prices.csv"), DataFrame)
     start_ind = 0
     for i in 1:nrow(price_file)
         if price_file[i,1] == Time(start)
@@ -55,7 +55,7 @@ function MPC_load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
 end
 function load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
     dd = data_dir
-    meta = CSV.read(joinpath(dd, "data/metadata.csv"), DataFrame)
+    meta = CSV.read(joinpath(dd, "synthetic_data/data/metadata.csv"), DataFrame)
     mb = nrow(meta)
     if num_builds < 1
         num_builds = 1
@@ -68,7 +68,7 @@ function load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
     builds = Vector{Building}()
 
     for i in 1:num_builds
-        filename = joinpath(dd, "cleaned_data", string(i, ".csv"))
+        filename = joinpath(dd, "synthetic_data/cleaned_data", string(i, ".csv"))
         file = CSV.read(filename, DataFrame, delim=",")
         if num_steps > nrow(file)
             num_steps = nrow(file)
@@ -76,11 +76,11 @@ function load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
         build = Building((rand(Float64, 1)[1], rand(Float64, 1)[1]), CSV.File(filename; select=[3]).actual_consumption_mean[1:num_steps], CSV.File(filename; select=[4]).actual_pv_mean[1:num_steps], meta[i,:capacity], meta[i,:power], meta[i,:charge_efficiency],meta[i,:discharge_efficiency],i)
         push!(builds, build)
     end
-    filename = joinpath(dd, "cleaned_data", string(1, ".csv"))
+    filename = joinpath(dd, "synthetic_data/cleaned_data", string(1, ".csv"))
     file = CSV.read(filename, DataFrame, delim=",")
     start = split(split(file[1,:DateTime],"+")[1], "T")[2]
 
-    price_file = CSV.read(joinpath(dd, "data/edf_prices.csv"), DataFrame)
+    price_file = CSV.read(joinpath(dd, "synthetic_data/data/edf_prices.csv"), DataFrame)
     start_ind = 0
     for i in 1:nrow(price_file)
         if price_file[i,1] == Time(start)
@@ -106,7 +106,7 @@ function clean_data(start_t::Int,num_steps::Int)
     end
     period = [string(string(p)[6:19] , "+00:00") for p in period]
     for i in 1:70
-        filename = "data/"*string(i)*".csv"
+        filename = "synthetic_data/data/"*string(i)*".csv"
         master = DataFrame(DateTime = period)
         file = CSV.read(filename, DataFrame, delim=";")
         file = transform(file, :timestamp => ByRow(x->split(x,'-')) => [:Year, :month, :dayTime])
@@ -123,7 +123,7 @@ function clean_data(start_t::Int,num_steps::Int)
         sort!(master)
         master = master[start_t:start_t+num_steps-1,:]
 
-        cleaned_filename = "cleaned_data/"*string(i)*".csv"
+        cleaned_filename = "synthetic_data/cleaned_data/"*string(i)*".csv"
         CSV.write(cleaned_filename, master)
     end
 end
@@ -142,7 +142,7 @@ function find_starts(num_steps::Int)
     period = [string(string(p)[6:19] , "+00:00") for p in period]
     possible_starts = [i for i in 1:35136-num_steps+1]
     for i in 1:70
-        filename = "data/"*string(i)*".csv"
+        filename = "synthetic_data/data/"*string(i)*".csv"
         master = DataFrame(DateTime = period)
         file = CSV.read(filename, DataFrame, delim=";")
         file = transform(file, :timestamp => ByRow(x->split(x,'-')) => [:Year, :month, :dayTime])
@@ -192,7 +192,7 @@ function check_start_end()
     max_start = 0
     min_end = 0
     for i in 1:7
-        filename = "data/"*string(i)*".csv"
+        filename = "synthetic_data/data/"*string(i)*".csv"
         file = CSV.read(filename, DataFrame, delim=";")
         num_builds = max_builds
         #Currently, use only predicted data from day 1, site loc is randomly assigned,
@@ -216,7 +216,7 @@ function check_start_end()
     end
     println(max_start)
     println(min_end)
-    # price_file = CSV.read("data/edf_prices.csv", DataFrame)
+    # price_file = CSV.read("synthetic_data/data/edf_prices.csv", DataFrame)
     # buy = collect(price_file[1:96,:buy])
     # sell = collect(price_file[1:96,:sell])
 

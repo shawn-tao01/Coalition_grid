@@ -23,7 +23,7 @@ discharge_eff(b::Building) = b.discharge_eff
 
 struct MPC_Building <: Player
 	loc::Tuple
-	pred_cons::Matrix{Float64}
+	pred_cons::Matrix{Float64} # 48x96 matrix of predicted consumption for each timestep and lookahead
 	pred_prod::Matrix{Float64}
 	act_cons::Vector{Float64}
 	act_prod::Vector{Float64}

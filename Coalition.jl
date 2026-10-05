@@ -23,6 +23,17 @@ using Base.Threads
 agent_ids(a::Int) = [a]
 agent_ids(a::Vector) = a
 
+# ---- Switches for the limited-information formation, items 1-3 of code_vs_paper_discrepancies.txt ----
+# The defaults reproduce the code the paper's results came from.
+Base.@kwdef mutable struct FormationParams
+    order::Symbol = :paper       # :paper     visit pairs from the SMALLEST val up, no val > 0 test (item 2)
+                                 # :val_desc  Algorithm 1 as written: largest val first, merge only if val > 0
+    exact_bound::Bool = false    # true: eq. (18) with an element-wise min (min.); false: the code's vector min (item 1)
+    fix_dissolve::Bool = false   # true: apply the (22) splits if ANY coalition fails; false: only if the LAST agent passed (item 3)
+end
+const FORM = FormationParams()
+const VAL_TOL = 1e-6   # merge values below this count as zero (solver noise around Q = 0)
+
 # DIAGNOSTIC: global log for coalition pick instrumentation. Each entry:
 # (k, round, picked_ids, picked_val, argmax_ids, argmax_val, is_argmax, delta_G)
 # Cleared by the caller before each run; read after to analyse picks.
@@ -566,7 +577,8 @@ acting alone.
 Returns `(agents, vars, num_iters)`. Deterministic — no RNG.
 """
 function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::Int, k::Int,num_look_ahead::Int,receding_horizon::Bool=false)
-    agents = Vector(1:length(buildings))
+    FORM.order in (:paper, :val_desc) || error("FORM.order must be :paper or :val_desc")
+    agents = Vector(1:length(buildings))           #A_new ← 所有 building
     done = false
     energy_diff = opt.energy_cost-opt.energy_sale
     num_iters=0
@@ -577,7 +589,7 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
     while !done
         done = true
         outs = Vector{Any}(undef, length(agents))
-        for i in 1:length(agents)
+        for i in 1:length(agents)                   #每个 agent 解问题 (9)
             agent = agents[i]
             if agent isa Int && haskey(singleton_cache, agent)
                 outs[i] = (singleton_cache[agent][1], 0)
@@ -599,7 +611,7 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
         end
         num_iters += sum([out[2] for out in outs])
 
-        cons_vec = Dict{Any, Vector{Float64}}()
+        cons_vec = Dict{Any, Vector{Float64}}()       #算 val
         for (agent, var) in zip(agents, vars)
             if agent isa Int && haskey(singleton_cache, agent)
                 cons_vec[agent] = singleton_cache[agent][2]
@@ -615,13 +627,18 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
             num_look_ahead = min(length(buildings[1].act_cons)-k+1, num_look_ahead)
             compatible_slots = (cons_vec[c[1]].*cons_vec[c[2]] .< zeros(length(cons_vec[c[1]])))[1:num_look_ahead]
             if any(compatible_slots)
-                poss_coal_vals[c] = energy_diff[1:num_look_ahead]'*(min(abs.(compatible_slots.*cons_vec[c[1]]),abs.(compatible_slots.*cons_vec[c[2]])))
+                qa = abs.(compatible_slots.*cons_vec[c[1]])
+                qb = abs.(compatible_slots.*cons_vec[c[2]])
+                # item 1: eq. (18) needs the element-wise min.; the code's min compares whole vectors
+                poss_coal_vals[c] = energy_diff[1:num_look_ahead]'*(FORM.exact_bound ? min.(qa, qb) : min(qa, qb)) ##
             end
         end
-        sorted_coal_vals = sort!(collect(poss_coal_vals), by=last)
+        # item 2: :paper visits pairs from the smallest val up; :val_desc from the largest down
+        sorted_coal_vals = sort!(collect(poss_coal_vals), by=last, rev = FORM.order == :val_desc)  #sort ##
         new_agents = Vector()
         coaled_agents = Vector()
-        for elem in sorted_coal_vals
+        for elem in sorted_coal_vals     # 按顺序接受互不重叠的 pair
+            FORM.order == :val_desc && elem[2] <= VAL_TOL && continue   # Algorithm 1: merge only if val > 0
             if !(elem[1][1] in coaled_agents) && !(elem[1][2] in coaled_agents)
                 new_coal = Vector()
                 append!(new_coal, elem[1][1], elem[1][2])
@@ -632,7 +649,7 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
                 end
             end
         end
-        for agent in agents
+        for agent in agents   #加回没配对的 agent
             if !(agent in coaled_agents)
                 push!(new_agents, agent)
             end
@@ -640,10 +657,11 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
 
         agents = new_agents
     end
-    pre_split_agents = agents
+    pre_split_agents = agents   # (22) 解散检查
     pre_split_vars = vars
     new_agents = Vector()
     added = false
+    any_split = false
     for (agent, var) in zip(agents,vars)
         added = false
         if length(agent) > 1
@@ -656,12 +674,14 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
                 for i in agent
                     push!(new_agents, i)
                 end
+                any_split = true
             end
         else
             push!(new_agents,agent)
         end
     end
-    if added
+    # item 3: the code applies the splits only if the LAST agent was a coalition that passed (22)
+    if FORM.fix_dissolve ? any_split : added
         agents = new_agents
     end
     vars_by_agent = Dict{Any, Any}(zip(pre_split_agents, pre_split_vars))

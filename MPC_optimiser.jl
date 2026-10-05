@@ -17,6 +17,31 @@ function energy_sale_k(opt::MPC_optimiser, k::Int, num_steps::Int=96)
 	return vcat(opt.energy_sale[k:last_elem], opt.energy_sale[1:k-1])[1:num_steps]
 end
 
+# Proactive scheduling after paper/SEGAN-D-26-04924.pdf ("Enhancing Resilience and Fairness in
+# Microgrid Energy Management Under Upstream Grid Faults"), eqs. (18f) and (19), without the slack
+# (18g). The paper's microgrid is the coalition being solved; a single building is its own microgrid.
+# One change from SEGAN: no equal share 1/N_ess per battery. The coalition holds its net demand as a
+# whole, and the solver decides which members' batteries hold it (the members supply each other).
+Base.@kwdef mutable struct ResilienceParams
+    enabled::Bool = true   # off = the paper's LP, unchanged
+    tau::Int = 4           # reserve window tau of eq. (19): net demand of steps t..t+tau (m = 0..tau)
+end
+const RESIL = ResilienceParams()
+
+# s~[t], lower bound on the TOTAL state of charge of the coalition bs at the
+# start of horizon step t, for t = 1..H+1 (entry H+1 is the state after the last step, SEGAN's s(K)).
+# It is the coalition's forecast net demand over steps t..t+tau, capped at the coalition's total capacity
+function stilde_coal(bs::Vector{MPC_Building}, k::Int, H::Int, tau::Int)
+    cap = sum(Float64(b.max_storage) for b in bs)
+    st = zeros(H + 1)
+    for t in 1:H+1
+        win = t:min(t + tau, size(bs[1].pred_cons, 2))
+        st[t] = max(0, min(sum(sum(b.pred_cons[k, win] .- b.pred_prod[k, win]) for b in bs), cap))
+    end
+    return st
+end
+
+
 
 function optimise(opt::MPC_optimiser,bs::Vector{Building},ADMM::Bool=true,receding_horizon::Bool=false)
 	num_builds = bs.size[1]
@@ -134,6 +159,13 @@ function single_optimise(opt::MPC_optimiser,bs::Vector{MPC_Building},k::Int,num_
 	
 	@constraint(model, cost_c, costs'.==energy_cost_k(opt,k,num_steps)'*grid_cons-energy_sale_k(opt,k,num_steps)'*grid_sell) # need to fix this
 
+	if RESIL.enabled
+		st = stilde_coal(bs, k, num_steps, RESIL.tau)
+		@constraint(model, resil_floor[t = 2:num_steps], sum(charge[t, b] for b in 1:num_builds) >= st[t])
+		# soc_end = [charge[num_steps, b] + Float64(charge_eff(bs[b])) * pos_delta_s[num_steps, b] +
+		#            neg_delta_s[num_steps, b] / Float64(discharge_eff(bs[b])) for b in 1:num_builds]
+		# @constraint(model, resil_end, sum(soc_end) >= st[num_steps + 1])
+	end
 	@objective(model, Min, ones(num_builds)'*costs)
 	
 	optimize!(model)
@@ -330,7 +362,7 @@ end
 
 function single_optimise_ADMM(opt::MPC_optimiser,bs::Vector{MPC_Building},k::Int,num_look_ahead::Int,receding_horizon::Bool=false)
 	num_builds = bs.size[1]
-	if num_builds == 1
+	if num_builds == 1 || RESIL.enabled   # the coalition floor couples the members; it is only in single_optimise, not in ADMM yet
 		return single_optimise(opt,bs,k,num_look_ahead,receding_horizon)[2], 1
 	end
 	if !receding_horizon
@@ -493,13 +525,15 @@ end
 function coal_MPC(coal_former::Function,bs::Vector{MPC_Building}, max_coal_size::Int,num_look_ahead::Int,receding_horizon::Bool=false)
     num_steps = length(bs[1].act_cons)
 	num_builds = length(bs)
-	buy = zeros(num_steps,num_builds)
+	buy = zeros(num_steps,num_builds) #48*8 = 384 length
 	sell = zeros(num_steps,num_builds)
 	num_iters = 0
 	old_coal = 0
 	stab_score = []
+	coal_hist = Any[]   # coalition structure chosen at each step
 	for k = 1:num_steps
         coal, outs, num_iters_k = coal_former(bs,max_coal_size,k,num_look_ahead,receding_horizon)
+		push!(coal_hist, deepcopy(coal))
 		num_iters += num_iters_k
         # if coal isa Vector{Vector{MPC_Building}}
         #     outs = [single_optimise_ADMM(opt, agent, k) for agent in coal]
@@ -559,5 +593,5 @@ function coal_MPC(coal_former::Function,bs::Vector{MPC_Building}, max_coal_size:
 		sell_price = hcat(repeat(opt.energy_sale,num_steps÷96), opt.energy_sale[1:(num_steps%96)])'
 	end
 	cost = sum(buy_cost'*buy-sell_price'*sell)
-	return cost, [buy, sell], num_iters/num_steps, stab_score
+	return cost, [buy, sell], num_iters/num_steps, stab_score, coal_hist
 end

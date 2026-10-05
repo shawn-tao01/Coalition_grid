@@ -27,7 +27,7 @@ using Printf
 using Random
 
 # ---- Configuration (edit these) ----
-const NUM_BUILDS      = 8
+const NUM_BUILDS      = 4
 const MAX_COAL        = 4          # 4 keeps ADMM solves tractable (6 is very slow)
 const NUM_STEPS       = 48         # 12 hours (96 = full day; 48 includes k=40 where merges happen)
 const NUM_LOOK_AHEAD  = 8          # MPC horizon
@@ -48,9 +48,15 @@ function run_method(label::String, coal_former)
 end
 
 # A decentralised coal_former: every building stays a singleton (no merges).
-function decentralised(bs, max_coal_size, k, num_look_ahead, receding_horizon=false)
+function decentralised(bs, max_coal_size, k, num_look_ahead, receding_horizon=false) #lookahead=8, k is the current timestep
     agents = Vector(1:length(bs))
-    outs = [single_optimise_ADMM(opt, bs[a], k, num_look_ahead, receding_horizon) for a in agents]
+    #outs = [single_optimise_ADMM(opt, bs[a], k, num_look_ahead, receding_horizon) for a in agents] 
+    
+    outs = Vector{Any}(undef, length(agents)) # for each building, run single-building ADMM optimisation
+    for a in agents
+        outs[a] = single_optimise_ADMM(opt, bs[a], k, num_look_ahead, receding_horizon)
+    end
+
     vars = [out[1] for out in outs]
     num_iters = sum([out[2] for out in outs])
     return agents, vars, num_iters

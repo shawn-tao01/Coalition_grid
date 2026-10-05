@@ -1,0 +1,5 @@
+I found three places where the code seems differs from Algorithm 1 and Section IV of the paper. I added a switch for each one, in the global FORM in Coalition.jl
+
+exact_bound: (18) takes the minimum at each time step. The code instead calls min on two whole vectors, I think Julia compares lexicographically, so now with exact_bound = true the code uses the element-wise min.
+order: I think the code sorts the pair values in increasing order, so the least valuable merges are accepted first and can block better ones. It also accepts pairs whose val is 0, which come from solver noise. With order = :val_desc it takes the largest val first and merges only if val > 0, as in Algorithm 1.
+fix_dissolve: the flag that applies inequality (22) seems to reset in every loop iteration. With fix_dissolve = true every violating coalition is dissolved.
