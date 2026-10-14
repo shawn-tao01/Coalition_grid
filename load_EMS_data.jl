@@ -33,7 +33,11 @@ function MPC_load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
         if num_steps > nrow(file)
             num_steps = nrow(file)
         end
-        build = MPC_Building((rand(Float64, 1)[1], rand(Float64, 1)[1]), Matrix(file[1:num_steps, Cols(x -> startswith(x, "load_"))]), Matrix(file[1:num_steps, Cols(x -> startswith(x, "pv_"))]), CSV.File(filename; select=[3]).actual_consumption_mean[1:num_steps], CSV.File(filename; select=[4]).actual_pv_mean[1:num_steps], meta[i,:capacity], meta[i,:power], meta[i,:charge_efficiency],meta[i,:discharge_efficiency],i,zeros(num_steps))
+        build = MPC_Building((rand(Float64, 1)[1], rand(Float64, 1)[1]), Matrix(file[1:num_steps, Cols(x -> startswith(x, "load_"))]), 
+        Matrix(file[1:num_steps, Cols(x -> startswith(x, "pv_"))]), CSV.File(filename; select=[3]).actual_consumption_mean[1:num_steps], 
+        CSV.File(filename; select=[4]).actual_pv_mean[1:num_steps], meta[i,:capacity], meta[i,:power], meta[i,:charge_efficiency],
+        meta[i,:discharge_efficiency],i,zeros(num_steps))
+        
         push!(builds, build)
     end
     filename = joinpath(dd, "synthetic_data/cleaned_data", string(1, ".csv"))

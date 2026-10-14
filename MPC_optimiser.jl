@@ -17,25 +17,35 @@ function energy_sale_k(opt::MPC_optimiser, k::Int, num_steps::Int=96)
 	return vcat(opt.energy_sale[k:last_elem], opt.energy_sale[1:k-1])[1:num_steps]
 end
 
-# Proactive scheduling after paper/SEGAN-D-26-04924.pdf ("Enhancing Resilience and Fairness in
-# Microgrid Energy Management Under Upstream Grid Faults"), eqs. (18f) and (19), without the slack
-# (18g). The paper's microgrid is the coalition being solved; a single building is its own microgrid.
-# One change from SEGAN: no equal share 1/N_ess per battery. The coalition holds its net demand as a
-# whole, and the solver decides which members' batteries hold it (the members supply each other).
 Base.@kwdef mutable struct ResilienceParams
     enabled::Bool = true   # off = the paper's LP, unchanged
     tau::Int = 4           # reserve window tau of eq. (19): net demand of steps t..t+tau (m = 0..tau)
+    rho::Float64 = 10.0    # soft var penalty 
 end
 const RESIL = ResilienceParams()
 
-# s~[t], lower bound on the TOTAL state of charge of the coalition bs at the
-# start of horizon step t, for t = 1..H+1 (entry H+1 is the state after the last step, SEGAN's s(K)).
-# It is the coalition's forecast net demand over steps t..t+tau, capped at the coalition's total capacity
+# Outage management after paper/SEGAN-D-26-04924.pdf, Section 3.3: no upstream grid from step OUTAGE.start to
+# OUTAGE.stop (both included). A closed loop calls single_optimise_outage instead of the scheduling problem at the steps
+# where in_outage(k) is true (test_single_optimise_soc.jl does; coal_MPC does not).
+Base.@kwdef mutable struct OutageParams
+    enabled::Bool = false          # off = grid available at every step
+    start::Int = 21                # first step without grid (step 21 = 05:00, SEGAN's fault from the 5th hour)
+    stop::Int = 48                 # last step without grid (step 48 = 11:45-12:00)
+    keep_coalitions::Bool = true   # for a closed loop with coalitions: keep those of step start-1 (not used anywhere yet)
+    c_shed::Float64 = 1.0          # c^shed in (29a), per unit of load not supplied
+    c_curt::Float64 = 0.1          # c^curt in (29a), per unit of PV curtailed
+    eps::Float64 = 0.05            # epsilon in (29a), per unit of charging; must exceed c_curt*(1 - eta_c*eta_d), or the LP
+                                   # burns surplus PV by charging and discharging at once instead of curtailing it
+end
+const OUTAGE = OutageParams()
+in_outage(k::Int) = OUTAGE.enabled && OUTAGE.start <= k <= OUTAGE.stop
+
+
 function stilde_coal(bs::Vector{MPC_Building}, k::Int, H::Int, tau::Int)
     cap = sum(Float64(b.max_storage) for b in bs)
     st = zeros(H + 1)
     for t in 1:H+1
-        win = t:min(t + tau, size(bs[1].pred_cons, 2))
+        win = t+1:min(t + tau, size(bs[1].pred_cons, 2))
         st[t] = max(0, min(sum(sum(b.pred_cons[k, win] .- b.pred_prod[k, win]) for b in bs), cap))
     end
     return st
@@ -159,19 +169,83 @@ function single_optimise(opt::MPC_optimiser,bs::Vector{MPC_Building},k::Int,num_
 	
 	@constraint(model, cost_c, costs'.==energy_cost_k(opt,k,num_steps)'*grid_cons-energy_sale_k(opt,k,num_steps)'*grid_sell) # need to fix this
 
+	shortfall_cost = 0.0
 	if RESIL.enabled
 		st = stilde_coal(bs, k, num_steps, RESIL.tau)
 		@constraint(model, resil_floor[t = 2:num_steps], sum(charge[t, b] for b in 1:num_builds) >= st[t])
+
+
+		# @variable(model, resil_short[t = 2:num_steps] >= 0)
+		# @constraint(model, resil_floor[t = 2:num_steps], sum(charge[t, b] for b in 1:num_builds) + resil_short[t] >= st[t])
+		# shortfall_cost = RESIL.rho * sum((resil_short[t] for t in 2:num_steps); init = 0.0)
+
+		
 		# soc_end = [charge[num_steps, b] + Float64(charge_eff(bs[b])) * pos_delta_s[num_steps, b] +
 		#            neg_delta_s[num_steps, b] / Float64(discharge_eff(bs[b])) for b in 1:num_builds]
 		# @constraint(model, resil_end, sum(soc_end) >= st[num_steps + 1])
 	end
 	@objective(model, Min, ones(num_builds)'*costs)
+	# @objective(model, Min, ones(num_builds)'*costs + shortfall_cost)
 	
 	optimize!(model)
 	#println(sum(value(neg_delta_s.*pos_delta_s)))
 
 	return model, [delta_s, grid_cons, grid_sell, charge, costs, coal_exch]
+end
+
+# Outage management problem for the coalition bs at step k
+#   - no power exchange with the upstream grid (21): grid_cons and grid_sell are dropped;
+#   - load can be shed and PV curtailed (24)-(25): served_cons <= consumps, used_prod <= prods;
+#   - the cost (29a) is c_shed * shed + c_curt * curtailment + eps * charging instead of the electricity bill.
+function single_optimise_outage(opt::MPC_optimiser,bs::Vector{MPC_Building},k::Int,num_look_ahead::Int,receding_horizon::Bool=false)
+	num_builds = bs.size[1]
+	model = Model(SCS.Optimizer)
+	num_steps = num_look_ahead
+	if !receding_horizon
+		num_steps = min(length(bs[1].act_cons)-k+1,num_steps)
+	end
+	num_steps = min(length(pred_consumption(bs[1],k)),num_steps)
+	num_steps = max(num_steps, 1)
+	set_silent(model)
+	set_optimizer_attribute(model, "eps_abs", 1e-4)
+	set_optimizer_attribute(model, "eps_rel", 1e-4)
+
+	max_flow_val = repeat(hcat([max_flow(b) for b in bs])', num_steps, 1)
+	@variable(model, 0<=pos_delta_s[t=1:num_steps, b=1:num_builds]<=max_flow_val[t,b])
+	@variable(model, -max_flow_val[t,b]<=neg_delta_s[t=1:num_steps, b=1:num_builds]<=0)
+	@variable(model, delta_s[1:num_steps,1:num_builds])
+	@constraint(model, charge_sum, delta_s == pos_delta_s+neg_delta_s)
+
+	consumps = reduce(hcat, [pred_consumption(b,k,num_steps) for b in bs])
+	prods = reduce(hcat,[pred_production(b,k,num_steps) for b in bs])
+	@variable(model, 0 <= served_cons[t=1:num_steps, b=1:num_builds] <= consumps[t,b])   # load actually supplied
+	@variable(model, 0 <= used_prod[t=1:num_steps, b=1:num_builds] <= prods[t,b])        # PV actually used
+
+	@variable(model, coal_exch[1:num_steps, 1:num_builds])
+	capacities = repeat(hcat([max_store(b) for b in bs])', num_steps, 1)
+	@variable(model, 0 <= charge[t=1:num_steps, b=1:num_builds] <= capacities[t,b])
+	@variable(model, costs[1:num_builds])
+
+	charge_mat = hcat(vcat(zeros(num_steps-1)',I(num_steps-1)),zeros(num_steps))
+	charge_eff_vec = hcat([charge_eff(b) for b in bs])
+	discharge_eff_vec = hcat([1/discharge_eff(b) for b in bs])
+	init_charge_mat = vcat([b.SoC[k] for b in bs]',zeros(num_steps-1,num_builds))
+	@constraint(model, charge_c, charge .== charge_mat*charge+charge_mat*(pos_delta_s.*charge_eff_vec')+charge_mat*(neg_delta_s.*discharge_eff_vec')+init_charge_mat)
+
+	@constraint(model, final_delta_c, delta_s[num_steps, :] >= -charge[num_steps, :])
+
+	@constraint(model, power_c, served_cons+delta_s+coal_exch.==used_prod)   # (21): no grid_cons, grid_sell
+
+	@constraint(model, coal_c, coal_exch*ones(num_builds).==0)
+
+	# (29a), with shed = consumps - served_cons (23) and curtailment = prods - used_prod (22)
+	@constraint(model, cost_c, costs'.==OUTAGE.c_shed*ones(num_steps)'*(consumps-served_cons)+OUTAGE.c_curt*ones(num_steps)'*(prods-used_prod)+OUTAGE.eps*ones(num_steps)'*pos_delta_s)
+
+	@objective(model, Min, ones(num_builds)'*costs)
+
+	optimize!(model)
+
+	return model, [delta_s, nothing, nothing, charge, costs, coal_exch, served_cons, used_prod]
 end
 
 function ADMM_build_opt(b::MPC_Building,coal_trades::Vector{Float64},lambda::Vector{Float64},k::Int,c::Float64)
@@ -431,6 +505,9 @@ end
 function single_optimise(opt::MPC_optimiser,b::MPC_Building,k::Int,num_look_ahead::Int,receding_horizon::Bool=false)
 	return single_optimise(opt,[b],k,num_look_ahead,receding_horizon)
 end
+function single_optimise_outage(opt::MPC_optimiser,b::MPC_Building,k::Int,num_look_ahead::Int,receding_horizon::Bool=false)
+	return single_optimise_outage(opt,[b],k,num_look_ahead,receding_horizon)
+end
 
 function optimise(opt::MPC_optimiser,bs::Vector{MPC_Building},num_look_ahead::Int,ADMM::Bool=true,receding_horizon::Bool=false)
 	num_steps = length(bs[1].act_cons)
@@ -527,6 +604,8 @@ function coal_MPC(coal_former::Function,bs::Vector{MPC_Building}, max_coal_size:
 	num_builds = length(bs)
 	buy = zeros(num_steps,num_builds) #48*8 = 384 length
 	sell = zeros(num_steps,num_builds)
+	shed = zeros(num_steps,num_builds)   # outage steps: load that cannot be supplied
+	curt = zeros(num_steps,num_builds)   # outage steps: generation curtailed
 	num_iters = 0
 	old_coal = 0
 	stab_score = []
@@ -562,7 +641,9 @@ function coal_MPC(coal_former::Function,bs::Vector{MPC_Building}, max_coal_size:
 					# println(b.SoC)
 					remaining = b.act_prod[k]-b.act_cons[k]-(value(res[6][1,i]) + value(res[1][1,i]))
 					isnan(remaining) && (remaining = 0.0)
-					if remaining > 0
+					if in_outage(k)   # no grid: a surplus is curtailed, a deficit is load that cannot be supplied
+						remaining > 0 ? (curt[k,b.id] = remaining) : (shed[k,b.id] = -remaining)
+					elseif remaining > 0
 						sell[k,b.id] = remaining
 					else
 						buy[k,b.id]=-remaining
@@ -577,7 +658,9 @@ function coal_MPC(coal_former::Function,bs::Vector{MPC_Building}, max_coal_size:
 				end
 				remaining = b.act_prod[k]-b.act_cons[k]-(value(res[6][1,1]) + value(res[1][1,1]))
 				isnan(remaining) && (remaining = 0.0)
-				if remaining > 0
+				if in_outage(k)   # no grid: a surplus is curtailed, a deficit is load that cannot be supplied
+					remaining > 0 ? (curt[k,b.id] = remaining) : (shed[k,b.id] = -remaining)
+				elseif remaining > 0
 					sell[k,b.id] = remaining
 				else
 					buy[k,b.id]=-remaining
@@ -593,5 +676,5 @@ function coal_MPC(coal_former::Function,bs::Vector{MPC_Building}, max_coal_size:
 		sell_price = hcat(repeat(opt.energy_sale,num_steps÷96), opt.energy_sale[1:(num_steps%96)])'
 	end
 	cost = sum(buy_cost'*buy-sell_price'*sell)
-	return cost, [buy, sell], num_iters/num_steps, stab_score, coal_hist
+	return cost, [buy, sell], num_iters/num_steps, stab_score, coal_hist, [shed, curt]
 end

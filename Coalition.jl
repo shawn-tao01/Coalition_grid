@@ -589,14 +589,14 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
     while !done
         done = true
         outs = Vector{Any}(undef, length(agents))
-        for i in 1:length(agents)                   #每个 agent 解问题 (9)
+        for i in 1:length(agents)                   #每个 agent 解问题 (9), agent is a number list
             agent = agents[i]
             if agent isa Int && haskey(singleton_cache, agent)
                 outs[i] = (singleton_cache[agent][1], 0)
             elseif agent isa Int
                 res = single_optimise_ADMM(opt, buildings[agent], k, num_look_ahead, receding_horizon)
-                cv = vec(sum(value(res[1][2]-res[1][3]), dims=2))
-                cv = [isnan(x) ? 0.0 : x for x in cv]
+                cv = vec(sum(value(res[1][2]-res[1][3]), dims=2)) #difference between buy/sell，if the value is negative, it means the agent is selling energy, if positive, it means the agent is buying energy in total
+                cv = [isnan(x) ? 0.0 : x for x in cv] 
                 singleton_cache[agent] = (res[1], cv)
                 outs[i] = (res[1], res[2])
             else
@@ -611,7 +611,7 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
         end
         num_iters += sum([out[2] for out in outs])
 
-        cons_vec = Dict{Any, Vector{Float64}}()       #算 val
+        cons_vec = Dict{Any, Vector{Float64}}()       #算 val, is this only the net energy exchange?
         for (agent, var) in zip(agents, vars)
             if agent isa Int && haskey(singleton_cache, agent)
                 cons_vec[agent] = singleton_cache[agent][2]
@@ -625,11 +625,13 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
         poss_coal_vals = Dict()
         for c in poss_coals
             num_look_ahead = min(length(buildings[1].act_cons)-k+1, num_look_ahead)
-            compatible_slots = (cons_vec[c[1]].*cons_vec[c[2]] .< zeros(length(cons_vec[c[1]])))[1:num_look_ahead]
+            compatible_slots = (cons_vec[c[1]].*cons_vec[c[2]] .< zeros(length(cons_vec[c[1]])))[1:num_look_ahead] # 1 or 0 in the compatible slots based
             if any(compatible_slots)
-                qa = abs.(compatible_slots.*cons_vec[c[1]])
+                qa = abs.(compatible_slots.*cons_vec[c[1]]) 
                 qb = abs.(compatible_slots.*cons_vec[c[2]])
                 # item 1: eq. (18) needs the element-wise min.; the code's min compares whole vectors
+                # was min( abs.(compatible_slots.*cons_vec[c[1]]), abs.(compatible_slots.*cons_vec[c[2]]) ) # should be dotted with price vector
+                # item 4: energy_diff[1:H] prices steps 1..H, but cons_vec covers steps k..k+H-1; eq. (18) needs energy_cost_k/energy_sale_k at k
                 poss_coal_vals[c] = energy_diff[1:num_look_ahead]'*(FORM.exact_bound ? min.(qa, qb) : min(qa, qb)) ##
             end
         end
@@ -657,8 +659,8 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
 
         agents = new_agents
     end
-    pre_split_agents = agents   # (22) 解散检查
-    pre_split_vars = vars
+    pre_split_agents = agents   # store the agents before the check
+    pre_split_vars = vars   # the vars contain the results of the optimisation for each agent
     new_agents = Vector()
     added = false
     any_split = false
@@ -698,4 +700,147 @@ function privacy_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::
         end
     end
     return agents, vars, num_iters
+end
+
+const RES_TOL = 1e-3   # reserve margins that differ by less than this count as equal
+
+# Energy exchanged inside a coalition in the first step of its plan: the sum of the members' positive coal_exch, i.e. the
+# energy they send to the other members, which equals the energy the others receive because sum(coal_exch) = 0 (coal_c).
+# No prices. A single building has no partner, so its value is 0. NaN if the solve failed.
+function first_step_compensation(var, n::Int)
+    n == 1 && return 0.0
+    c = [value(var[6][1, i]) for i in 1:n]
+    return any(isnan, c) ? NaN : sum(max(x, 0.0) for x in c)
+end
+
+# V(C) of a plan: the members' planned cost over the horizon; a failed solve counts as infinite cost
+plan_cost(var) = (v = sum(value.(var[5])); isnan(v) ? Inf : v)
+
+# Reserve margin of a coalition at step k, the resilience indicator of phase 1: the members' predicted PV plus stored
+# energy minus predicted load at step k, minus the coalition's reserve s~_C for the next tau steps (stilde_coal, entry 1).
+# > 0: energy left beyond the reserve; < 0: short of it. Data only, no plan needed.
+function reserve_margin(bs::Vector{MPC_Building}, k::Int)
+    net = sum(b.pred_prod[k, 1] + b.SoC[k] - b.pred_cons[k, 1] for b in bs)
+    return net - stilde_coal(bs, k, 1, RESIL.tau)[1]
+end
+
+# Reachable margin of a coalition (method B): at each horizon step j = 2..H, the most total energy its batteries can hold
+# when charging at full power from now on, minus the reserve s~_C required there (resil_floor); the worst step of the
+# window. With the grid, charging at full power is always possible, so the coalition's problem is feasible if and only
+# if this is >= 0. Data only, no plan needed. Inf when there is no reserve constraint.
+function reach_margin(bs::Vector{MPC_Building}, k::Int, H::Int)
+    (!RESIL.enabled || H < 2) && return Inf
+    st = stilde_coal(bs, k, H, RESIL.tau)          # st[j]: reserve at horizon step j (j = 1 is step k)
+    return minimum(sum(min(Float64(b.max_storage), b.SoC[k] + Float64(b.charge_eff)*Float64(b.storage_max_flow)*(j - 1))
+                       for b in bs) - st[j] for j in 2:H)
+end
+
+# Resilience value used to rank coalitions: the worse of the reserve margin now and the reachable margin over the window
+resilience_value(bs::Vector{MPC_Building}, k::Int, H::Int) = min(reserve_margin(bs, k), reach_margin(bs, k, H))
+
+"""
+    resilience_focussed_coals(buildings, max_coal_size, k, num_look_ahead, receding_horizon=false)
+
+Coalition formation in two greedy bottom-up phases, each like Algorithm 1 of the paper (rounds of pairwise merges of
+the current agents, best pair first, until a round merges nothing). The resilience of an agent C is m(C) =
+resilience_value, the worse of its reserve margin now (reserve_margin) and its reachable margin over the window
+(reach_margin). A candidate merge a ∪ b with a negative reachable margin has no feasible plan and is skipped without
+solving; every other one is solved, giving saving = V(a) + V(b) - V(a ∪ b), the planned cost saved over the horizon.
+Phase 1 (resilience, max-min) merges only if m(a ∪ b) > min(m(a), m(b)), i.e. the merge lifts the weaker of the two:
+the pair whose weaker agent has the lowest margin first, and for the same agent the partner giving the largest m(a ∪ b).
+Phase 2 (cost) starts from the structure of phase 1 and merges further only if saving > 0 and m(a ∪ b) >=
+min(m(a), m(b)), largest saving first. So neither phase lowers the smallest margin of the coalition structure.
+A failed solve counts as infinite cost. Test (22) then dissolves a coalition only where that does not lower resilience
+(every member alone has at least the coalition's margin) and lowers the first-step cost.
+Unlike privacy_focussed_coals, every candidate pair is solved jointly, so its members share full information, and a
+round needs one solve per pair of agents.
+At an outage step (in_outage(k)) the coalitions are formed again with the outage problem single_optimise_outage: V is
+the planned shedding and curtailment cost, the resilience value is the reserve margin alone (no grid to charge from),
+and test (22) is not applied (no grid cost).
+
+Returns `(agents, vars, num_iters)`.
+"""
+function resilience_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::Int, k::Int,num_look_ahead::Int,receding_horizon::Bool=false)
+    num_iters = 0
+    p_buy, p_sell = energy_cost_k(opt, k, 1)[1], energy_sale_k(opt, k, 1)[1]
+    first_step_cost(var) = sum(value.(var[2][1, :]))*p_buy - sum(value.(var[3][1, :]))*p_sell
+    plans = Dict{Any, Any}()                       # agent => (plan, resilience value, total cost)
+    merged = Dict{Vector{Int}, Any}()              # sorted member ids => (ids, plan, resilience value, total cost) of a solved merge
+    H = receding_horizon ? num_look_ahead : min(length(buildings[1].act_cons) - k + 1, num_look_ahead)
+    H = max(min(length(pred_consumption(buildings[1], k)), H), 1)   # horizon length, as in single_optimise
+    # Outage step: no grid, so every plan is the outage problem (shed + curtailment cost) and the coalitions are formed
+    # again at every step; there is no grid to charge from, so the reachable margin does not apply.
+    outage = in_outage(k)
+    solve_plan(ids) = outage ? (single_optimise_outage(opt, buildings[ids], k, num_look_ahead, receding_horizon)[2], 1) :
+                               single_optimise_ADMM(opt, buildings[ids], k, num_look_ahead, receding_horizon)
+    value_of(bs) = outage ? reserve_margin(bs, k) : resilience_value(bs, k, H)
+
+    agents = Vector{Any}(1:length(buildings))      # A_new ← 所有 building
+    for a in agents                                # 每个 building 单独解问题 (9)
+        res = solve_plan([a])
+        num_iters += res[2]
+        plans[a] = (res[1], value_of(buildings[[a]]), plan_cost(res[1]))
+    end
+    # first-step cost of each building alone, for (22); an outage has no grid cost
+    dec_single_vals = outage ? Float64[] : [first_step_cost(plans[a][1]) for a in agents]
+
+    for phase in (:resilience, :cost)
+        while true                                 # one round of pairwise merges
+            candidates = []
+            for (a, b) in combinations(agents, 2)
+                ids = vcat(agent_ids(a), agent_ids(b))
+                length(ids) <= max_coal_size || continue
+                key = sort(ids)
+                !outage && reach_margin(buildings[ids], k, H) < -RES_TOL && continue   # method B: no feasible plan, not solved
+                if !haskey(merged, key)            # solve each merge once; phase 2 re-uses the solves of phase 1
+                    res = solve_plan(ids)
+                    num_iters += res[2]
+                    merged[key] = (ids, res[1], value_of(buildings[ids]), plan_cost(res[1]))
+                end
+                ids, plan, m_ab, V = merged[key]
+                isinf(V) && continue               # the merged problem has no solution
+                lo = min(plans[a][2], plans[b][2])           # margin of the weaker of the two
+                saving = plans[a][3] + plans[b][3] - V       # cost saved by merging
+
+                if phase == :resilience
+                    m_ab > lo + RES_TOL || continue                        # phase 1: only merges that lift the weaker one
+                    score = (-lo, m_ab)                                    # weakest agent first, then its best partner
+                else
+                    (saving > VAL_TOL && m_ab >= lo - RES_TOL) || continue # phase 2: cheaper, weaker margin not lowered
+                    score = saving
+                end
+
+                push!(candidates, (ids = ids, plan = plan, margin = m_ab, V = V, score = score))
+            end
+            
+            sort!(candidates, by = c -> c.score, rev = true)  # best pair first (phase 1 scores are tuples)
+            new_agents = Vector{Any}()
+            taken = Set{Int}()
+            for c in candidates                    # 按顺序接受互不重叠的 pair
+                any(i in taken for i in c.ids) && continue
+                push!(new_agents, c.ids)
+                union!(taken, c.ids)
+                plans[c.ids] = (c.plan, c.margin, c.V)
+            end
+
+            isempty(new_agents) && break           # no merge in this round: the phase is over
+            for a in agents                        # 加回没配对的 agent
+                any(i in taken for i in agent_ids(a)) || push!(new_agents, a)
+            end
+            agents = new_agents
+        end
+    end
+
+    # (22) 解散检查, only where dissolving does not lower resilience: a coalition whose members alone all have at least its
+    # margin is dissolved if its first-step cost is above that of its members alone
+    final_agents = Vector{Any}()
+    for a in agents
+        if !outage && length(agent_ids(a)) > 1 && minimum(plans[i][2] for i in a) >= plans[a][2] - RES_TOL &&
+           sum(dec_single_vals[i] for i in a) < first_step_cost(plans[a][1])
+            append!(final_agents, a)               # its members act alone
+        else
+            push!(final_agents, a)
+        end
+    end
+    return final_agents, [plans[a][1] for a in final_agents], num_iters
 end
