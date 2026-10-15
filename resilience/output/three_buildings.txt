@@ -1,0 +1,13 @@
+case                                 cost |     shed curtailed | t_mean (s) t_max (s) solves | not OPTIMAL
+decentralised, resilience off       62.77 |   368.49    164.27 |      0.024     0.107    3.0 |    0 of  288
+resilience first, proactive         76.56 |   296.80    141.90 |      0.039     0.065    5.9 |    0 of  211
+
+cost:        realised grid cost of the day
+shed:        load not supplied during the outage, summed over buildings and steps
+curtailed:   generation curtailed during the outage, summed over buildings and steps
+t_mean (s):  wall time of the coalition formation at one step, the mean over the 96 steps
+t_max (s):   the slowest of the 96 steps
+solves:      optimisation problems solved at one step, mean over the 96 steps (so there is decimal)
+not OPTIMAL: applied plans (one per coalition per step) whose solver status is neither OPTIMAL nor ALMOST_OPTIMAL, out of all applied plans
+outage at steps 21-48
+PASS

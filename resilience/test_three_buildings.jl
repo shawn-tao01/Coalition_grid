@@ -45,9 +45,7 @@ function decentralised(bs, max_coal_size, k, num_look_ahead, receding_horizon = 
 end
 
 """
-One closed-loop day with fresh buildings (coal_MPC changes b.SoC in place). The coalition former is
-wrapped to record the solver status of every plan it returns, so infeasible solves are counted, and the
-soft-floor shortfall resil_short of every plan, summed over the coalitions of each step.
+Closed-loop simulation.
 """
 function run_case(label, former; enabled, order = :paper, exact = false, fix = false)
     RESIL.enabled = enabled
@@ -56,10 +54,13 @@ function run_case(label, former; enabled, order = :paper, exact = false, fix = f
     global opt = MPC_optimiser(buy', sell')
     statuses = Any[]
     fails = Any[]   # every returned plan whose solve did not end OPTIMAL: step, coalition, solver statuses
-    short_next = zeros(NUM_STEPS)   # [k+1]: resil_short[2] of the plans made at k, i.e. the applied state below s~C
-    short_plan = zeros(NUM_STEPS)   # [k]: resil_short[2..H] summed, the whole shortfall planned at k
+    short_next = zeros(NUM_STEPS)   # [k+1]: soft var resil_short[2] of the plans made at k
+    short_plan = zeros(NUM_STEPS)   # [k]:  soft var resil_short[2..H] summed
+    step_time = zeros(NUM_STEPS)    # [k]: wall time of the coalition formation for Algorithm 1 at step k
     recorded = function (bs, mcs, k, na, rh)
+        t1 = time()
         coal, vars, iters = former(bs, mcs, k, na, rh) #former can be privacy_focused coals
+        step_time[k] = time() - t1
         for (c, v) in zip(coal, vars)
             m = owner_model(first(v[4]))
             push!(statuses, termination_status(m))
@@ -74,10 +75,12 @@ function run_case(label, former; enabled, order = :paper, exact = false, fix = f
         end
         return coal, vars, iters
     end
+
     t0 = time()
-    cost, _, _, _, hist, (shed, curt) = coal_MPC(recorded, bs, CMAX, H)
+    cost, _, solves_per_step, _, hist, (shed, curt) = coal_MPC(recorded, bs, CMAX, H)
+
     return (label = label, bs = bs, cost = cost, hist = hist, time = time() - t0, resil = enabled,
-            shed = sum(shed), curt = sum(curt),
+            shed = sum(shed), curt = sum(curt), step_time = step_time, solves_per_step = solves_per_step,
             bad = count(s -> !(s in (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL)), statuses), solves = length(statuses),
             fails = fails, short_next = short_next, short_plan = short_plan)
 end
@@ -85,15 +88,11 @@ end
 """
 Step-by-step check of a run: at every step k, each coalition C must reach, at k+1, a total SoC of at least its floor s~_C from eq. (19). Returns
 - the number of coalition-steps below s~_C;
-- covered: member-steps in a pair where the member holds less than its own floor s~_{i} (what it would
-  have to hold alone), i.e. its partner's battery covers part of its need;
-- how often each pair formed;
 - below: the coalition-steps under s~_C, with their gap.
 """
 function assess(r)
     bs = r.bs
-    violations, covered = 0, 0
-    pairs = Dict{String,Int}()
+    violations = 0
     below = Any[]
     for k in 1:NUM_STEPS-1
         in_outage(k) && continue
@@ -104,43 +103,58 @@ function assess(r)
                 violations += 1
                 push!(below, (k = k, members = m, gap = g))
             end
-            length(m) > 1 || continue
-            for i in m
-                own = stilde_coal(bs[i:i], k, 1, RESIL.tau)[2]
-                bs[i].SoC[k+1] < own - 1e-3 * Float64(bs[i].max_storage) && (covered += 1)
-            end
-            key = join(NAMES[sort(m)], " + ")
-            pairs[key] = get(pairs, key, 0) + 1
         end
     end
-    return violations, covered, pairs, below
+    return violations, below
 end
 
+#Solve once before the timed runs so the timing do not include Julia's compilation
+function warmup()
+    RESIL.enabled = true
+    bs, buy, sell = load_subset()
+    global opt = MPC_optimiser(buy', sell')
+    resilience_focussed_coals(bs, CMAX, 1, H)
+    OUTAGE.enabled && resilience_focussed_coals(bs, CMAX, OUTAGE.start, H)
+    return nothing
+end
+warmup()
+
 results = [
-    # run_case("decentralised, resilience off", decentralised; enabled = false),
+    run_case("decentralised, resilience off", decentralised; enabled = false),   # reference for cost and shedding
     # run_case("as published, resilience off", privacy_focussed_coals; enabled = false),
-    # run_case("decentralised, proactive", decentralised; enabled = true),
-    # run_case("as published, proactive", privacy_focussed_coals; enabled = true),
-    run_case("resilience first, proactive", resilience_focussed_coals; enabled = true),
-    # run_case("Algorithm 1, proactive", privacy_focussed_coals; enabled = true, order = :val_desc, exact = true, fix = true),
+    run_case("resilience first, proactive", resilience_focussed_coals; enabled = true)
 ]
 FORM.order, FORM.exact_bound, FORM.fix_dissolve = :paper, false, false   # back to the defaults
 checks = [assess(r) for r in results]
 
-# ---------------------------------------------------------------- table
-println()
-@printf("%-32s %8s %6s | %8s %9s | %6s | %7s | %-11s | %s\n", "case", "cost", "time s", "shed", "curtailed",
-        "below", "covered", "not OPTIMAL", "pairs formed (steps)")
+# ---------------------------------------------------------------- table, written to output/three_buildings.txt
+table_file = joinpath(@__DIR__, "output", "three_buildings.txt")
+mkpath(dirname(table_file))
 ok = true
-for (r, (viol, covered, pairs)) in zip(results, checks)
-    r.resil && (viol > 0 || r.bad > 0) && (global ok = false)
-    pair_str = isempty(pairs) ? "none" : join(["$p: $n" for (p, n) in sort(collect(pairs), by = x -> -x[2])], ", ")
-    @printf("%-32s %8.2f %6.1f | %8.2f %9.2f | %6d | %7d | %4d of %4d | %s\n", r.label, r.cost, r.time,
-            r.shed, r.curt, viol, covered, r.bad, r.solves, pair_str)
+open(table_file, "w") do io
+    @printf(io, "%-32s %8s | %8s %9s | %10s %9s %6s | %s\n", "case", "cost", "shed", "curtailed",
+            "t_mean (s)", "t_max (s)", "solves", "not OPTIMAL")
+    for (r, (viol, _)) in zip(results, checks)
+        r.resil && (viol > 0 || r.bad > 0) && (global ok = false)
+        @printf(io, "%-32s %8.2f | %8.2f %9.2f | %10.3f %9.3f %6.1f | %4d of %4d\n", r.label, r.cost,
+                r.shed, r.curt, sum(r.step_time) / NUM_STEPS, maximum(r.step_time), r.solves_per_step, 
+                r.bad, r.solves)
+    end
+    println(io)
+    for (col, text) in [
+            "cost"        => "realised grid cost of the day",
+            "shed"        => "load not supplied during the outage, summed over buildings and steps",
+            "curtailed"   => "generation curtailed during the outage, summed over buildings and steps",
+            "t_mean (s)"  => "wall time of the coalition formation at one step, the mean over the $(NUM_STEPS) steps",
+            "t_max (s)"   => "the slowest of the $(NUM_STEPS) steps",
+            "solves"      => "optimisation problems solved at one step, mean over the $(NUM_STEPS) steps (so there is decimal)",
+            "not OPTIMAL" => "applied plans (one per coalition per step) whose solver status is neither OPTIMAL nor ALMOST_OPTIMAL, out of all applied plans"]
+        @printf(io, "%-13s%s\n", col * ":", text)
+    end
+    OUTAGE.enabled && println(io, "outage at steps $(OUTAGE.start)-$(OUTAGE.stop)")
+    println(io, ok ? "PASS" : "FAIL: a proactive run had a failed solve or a coalition below s~C")
 end
-OUTAGE.enabled && println("outage at steps $(OUTAGE.start)-$(OUTAGE.stop))")
-println(ok ? "PASS: every proactive run solved every problem and kept every coalition at or above s~C" :
-        "FAIL: a proactive run had a failed solve or a coalition below s~C")
+println("saved ", table_file)
 
 # ---------------------------------------------------------------- which solves failed
 """
@@ -163,7 +177,7 @@ for (r, ch) in zip(results, checks)
     for f in r.fails
         @printf("   k = %2d  %-8s  solve ended %s (primal %s)\n", f.k, string(f.members), f.status, f.primal)
     end
-    for b in ch[4]
+    for b in ch[2]
         @printf("   k = %2d  %-8s  total energy at k+1 is %.4f below s~C\n", b.k, string(b.members), -b.gap)
     end
     isempty(r.fails) || diagnose(r, first(r.fails))   # others: diagnose(results[i], results[i].fails[j]; soft = (...))
@@ -180,20 +194,18 @@ panels = Any[]
 for i in eachindex(IDS)
     p = plot(title = NAMES[i], ylabel = "energy", legend = i == 1 ? :topright : false)
     for (j, col) in zip(on, colours)
-        plot!(p, hours, results[j].bs[i].SoC, label = results[j].label, lw = 2, color = col, linetype = :steppost)
+        plot!(p, hours, results[j].bs[i].SoC, label = "proactive scheduling", lw = 2, color = col, linetype = :steppost)
     end
     b = results[on[1]].bs[i]   # own floor (what the building must hold alone); none is set by an outage step
     own = [k == 1 || in_outage(k - 1) ? NaN : stilde_coal([b], k - 1, 1, RESIL.tau)[2] for k in 1:NUM_STEPS]
-    plot!(p, hours, own, label = "own s~ (alone)", lw = 1.5, color = :darkorange, ls = :dash, linetype = :steppost)
+    plot!(p, hours, own, label = "own tilde_s", lw = 1.5, color = :darkorange, ls = :dash, linetype = :steppost)
     outage_lines!(p; label = "outage start / end")
     push!(panels, p)
 end
 psh = plot(ylabel = "reserve slack", legend = :topright)   # resil_short: total energy below s~C
 for (j, col) in zip(on, colours)
     pre = length(on) > 1 ? results[j].label * ": " : ""
-    plot!(psh, hours, results[j].short_next, label = pre * "slack, next step", lw = 2, color = col, linetype = :steppost)
-    plot!(psh, hours, results[j].short_plan, label = pre * "slack, whole horizon", lw = 1, color = col, ls = :dash,
-          linetype = :steppost)
+    plot!(psh, hours, results[j].short_next, label = pre * "slack var of the s>=tilde_s, on next step only", lw = 2, color = col, linetype = :steppost)
 end
 outage_lines!(psh)
 push!(panels, psh)
@@ -205,12 +217,24 @@ pp = plot(ylabel = "pair formed", xlabel = "hour of day", legend = :topright, yl
           yticks = (0:3, ["none", "$(IDS[1]) + $(IDS[2])", "$(IDS[1]) + $(IDS[3])", "$(IDS[2]) + $(IDS[3])"]))
 li_runs = [r for r in results if !occursin("decentralised", r.label)]
 for (r, col, off) in zip(li_runs, (:orange, :black, :royalblue), (-0.08, 0.0, 0.08))
-    plot!(pp, hours, [pair_code(r.hist[k]) + off for k in 1:NUM_STEPS], label = r.label, lw = 2, color = col, linetype = :steppost)
+    plot!(pp, hours, [pair_code(r.hist[k]) + off for k in 1:NUM_STEPS], label = "proactive scheduling", lw = 2, color = col, linetype = :steppost)
 end
 outage_lines!(pp)
-fig = plot(panels..., pp, layout = grid(5, 1), size = (1000, 1600), left_margin = 8Plots.mm)
+fig = plot(panels..., pp, layout = grid(5, 1), size = (1050, 1600), left_margin = 8Plots.mm)
 outdir = joinpath(@__DIR__, "output")
 mkpath(outdir)
 savefig(fig, joinpath(outdir, "three_buildings.png"))
 savefig(fig, joinpath(outdir, "three_buildings.pdf"))
 println("saved ", joinpath(outdir, "three_buildings.png"), " and .pdf")
+
+# load and generation of the three buildings
+let script = joinpath(@__DIR__, "plot_buildings.py"),
+    python = something(Sys.which("python"), Sys.which("py"), "python"),
+    args = ["-b", string.(IDS)..., "--outdir", outdir, "--format", "png", "pdf"]
+    OUTAGE.enabled && append!(args, ["--outage", string(OUTAGE.start), string(OUTAGE.stop)])
+    try
+        run(`$python $script $args`)
+    catch e
+        println("could not run plot_buildings.py: ", e)
+    end
+end
