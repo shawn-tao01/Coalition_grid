@@ -83,14 +83,12 @@ function run_case(label, former; enabled, order = :paper, exact = false, fix = f
 end
 
 """
-Step-by-step check of a run: at every step k, each coalition C chosen at k (a single building is a
-coalition of one) must reach, at k+1, a total SoC of at least its floor s~_C from eq. (19). Returns
+Step-by-step check of a run: at every step k, each coalition C must reach, at k+1, a total SoC of at least its floor s~_C from eq. (19). Returns
 - the number of coalition-steps below s~_C;
 - covered: member-steps in a pair where the member holds less than its own floor s~_{i} (what it would
   have to hold alone), i.e. its partner's battery covers part of its need;
 - how often each pair formed;
 - below: the coalition-steps under s~_C, with their gap.
-Outage steps are skipped: there is no floor during an outage.
 """
 function assess(r)
     bs = r.bs
@@ -140,24 +138,13 @@ for (r, (viol, covered, pairs)) in zip(results, checks)
     @printf("%-32s %8.2f %6.1f | %8.2f %9.2f | %6d | %7d | %4d of %4d | %s\n", r.label, r.cost, r.time,
             r.shed, r.curt, viol, covered, r.bad, r.solves, pair_str)
 end
-OUTAGE.enabled && println("outage at steps $(OUTAGE.start)-$(OUTAGE.stop): 'shed' and 'curtailed' are the realised totals over it")
-println("\nas published = FORM defaults (smallest val first, vector min, last-agent dissolve flag);")
-println("Algorithm 1 = largest val first, exact eq. (18), dissolve test (22) applied to every coalition.")
-println("s~C = SEGAN eq. (19) without 1/N_ess for the coalition (or single building) at that step; 'below' counts")
-println("coalition-steps whose total energy is under it (only enforced when proactive scheduling is on); 'covered'")
-println("counts member-steps in a pair below the member's own floor, i.e. held for it by its partner;")
-println("'not OPTIMAL' counts returned plans whose solve failed.")
+OUTAGE.enabled && println("outage at steps $(OUTAGE.start)-$(OUTAGE.stop))")
 println(ok ? "PASS: every proactive run solved every problem and kept every coalition at or above s~C" :
         "FAIL: a proactive run had a failed solve or a coalition below s~C")
 
 # ---------------------------------------------------------------- which solves failed
 """
-Re-solve the problem behind the failed plan `f` (step f.k, coalition f.members) with the constraint groups
-in `soft` made soft: each constraint may be violated at a cost of `rho` per unit (JuMP's relax_with_penalty!).
-The constraints that come out violated are the ones the hard problem could not satisfy together. coal_MPC
-changed r.bs[i].SoC in place, but SoC[f.k] is still the state that solve started from, so the problem is the
-same. Groups are the constraint names in single_optimise (:resil_floor, :charge_c, :power_c, ...); variable
-bounds (0 <= charge <= capacity, flow limits) stay hard.
+Re-solve the problem behind the failed plan `f` of run `r`.
 """
 function diagnose(r, f; soft = (:resil_floor,), rho = 100.0)
     RESIL.enabled = r.resil

@@ -741,23 +741,10 @@ resilience_value(bs::Vector{MPC_Building}, k::Int, H::Int) = min(reserve_margin(
 """
     resilience_focussed_coals(buildings, max_coal_size, k, num_look_ahead, receding_horizon=false)
 
-Coalition formation in two greedy bottom-up phases, each like Algorithm 1 of the paper (rounds of pairwise merges of
-the current agents, best pair first, until a round merges nothing). The resilience of an agent C is m(C) =
+Coalition formation in two greedy bottom-up phases, each like Algorithm 1 of the paper. The resilience of an agent C is m(C) =
 resilience_value, the worse of its reserve margin now (reserve_margin) and its reachable margin over the window
-(reach_margin). A candidate merge a ∪ b with a negative reachable margin has no feasible plan and is skipped without
-solving; every other one is solved, giving saving = V(a) + V(b) - V(a ∪ b), the planned cost saved over the horizon.
-Phase 1 (resilience, max-min) merges only if m(a ∪ b) > min(m(a), m(b)), i.e. the merge lifts the weaker of the two:
-the pair whose weaker agent has the lowest margin first, and for the same agent the partner giving the largest m(a ∪ b).
-Phase 2 (cost) starts from the structure of phase 1 and merges further only if saving > 0 and m(a ∪ b) >=
-min(m(a), m(b)), largest saving first. So neither phase lowers the smallest margin of the coalition structure.
-A failed solve counts as infinite cost. Test (22) then dissolves a coalition only where that does not lower resilience
-(every member alone has at least the coalition's margin) and lowers the first-step cost.
-Unlike privacy_focussed_coals, every candidate pair is solved jointly, so its members share full information, and a
-round needs one solve per pair of agents.
-At an outage step (in_outage(k)) the coalitions are formed again with the outage problem single_optimise_outage: V is
-the planned shedding and curtailment cost, the resilience value is the reserve margin alone (no grid to charge from),
-and test (22) is not applied (no grid cost).
-
+(reach_margin). 
+At an outage step (in_outage(k)) the coalitions are formed again with the outage problem single_optimise_outage.
 Returns `(agents, vars, num_iters)`.
 """
 function resilience_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::Int, k::Int,num_look_ahead::Int,receding_horizon::Bool=false)

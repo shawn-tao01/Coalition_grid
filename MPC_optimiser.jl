@@ -24,13 +24,11 @@ Base.@kwdef mutable struct ResilienceParams
 end
 const RESIL = ResilienceParams()
 
-# Outage management after paper/SEGAN-D-26-04924.pdf, Section 3.3: no upstream grid from step OUTAGE.start to
-# OUTAGE.stop (both included). A closed loop calls single_optimise_outage instead of the scheduling problem at the steps
-# where in_outage(k) is true (test_single_optimise_soc.jl does; coal_MPC does not).
+# Outage management 
 Base.@kwdef mutable struct OutageParams
     enabled::Bool = false          # off = grid available at every step
-    start::Int = 21                # first step without grid (step 21 = 05:00, SEGAN's fault from the 5th hour)
-    stop::Int = 48                 # last step without grid (step 48 = 11:45-12:00)
+    start::Int = 21                # first step without grid 
+    stop::Int = 48                 # last step without grid 
     keep_coalitions::Bool = true   # for a closed loop with coalitions: keep those of step start-1 (not used anywhere yet)
     c_shed::Float64 = 1.0          # c^shed in (29a), per unit of load not supplied
     c_curt::Float64 = 0.1          # c^curt in (29a), per unit of PV curtailed
