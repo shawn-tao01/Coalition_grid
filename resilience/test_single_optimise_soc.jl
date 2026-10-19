@@ -11,6 +11,9 @@ const SOC0 = 0.5         # initial SoC as a share of capacity
 const DATA_DIR = ""      # load_EMS_data.jl currently hardcodes synthetic_data/; use "synthetic_data" if you revert that
 RESIL.tau = 4
 
+OUTAGE.enabled = false
+OUTAGE.start, OUTAGE.stop = 21, 48  
+
 
 """
 Run the receding-horizon loop with resilience on or off. `target[k]` is the s~ that the solve at
@@ -26,28 +29,38 @@ function run_closed_loop(enabled::Bool)
     status = Any[]
     objective_val = 0.0
     energy_cost = 0.0
+    unserved, curtailed = 0.0, 0.0   # outage only, realised: load not supplied, PV curtailed
 
     for k in 1:NUM_STEPS-1
         Hk = min(H, NUM_STEPS - k + 1)   # single_optimise shortens the horizon at the end of the data
-        target[k+1] = stilde_coal([b], k, Hk, RESIL.tau)[2]   # the call single_optimise makes (SEGAN eq. 19)
-        model, res = single_optimise(opt, [b], k, H)
+        if in_outage(k)   # no grid: the outage problem, no floor (target stays NaN)
+            model, res = single_optimise_outage(opt, [b], k, H)
+        else
+            target[k+1] = stilde_coal([b], k, Hk, RESIL.tau)[2]  
+            model, res = single_optimise(opt, [b], k, H)
+        end
         push!(status, termination_status(model))
         b.SoC[k+1] = max(0, value(res[4][2, 1]))
-        # remaining = b.act_prod[k] - b.act_cons[k] - (value(res[6][1, 1]) + value(res[1][1, 1]))
-        energy_cost += buy[k] * max(0, value(res[2][1, 1])) - sell[k] * max(0, value(res[3][1, 1]))
-        # cost += remaining > 0 ? -sell[k] * remaining : -buy[k] * remaining
+        if in_outage(k)   # as in coal_MPC: a surplus is curtailed, a deficit is load that cannot be supplied
+            remaining = b.act_prod[k] - b.act_cons[k] - (value(res[6][1, 1]) + value(res[1][1, 1]))
+            remaining > 0 ? (curtailed += remaining) : (unserved -= remaining)
+        else
+            # remaining = b.act_prod[k] - b.act_cons[k] - (value(res[6][1, 1]) + value(res[1][1, 1]))
+            energy_cost += buy[k] * max(0, value(res[2][1, 1])) - sell[k] * max(0, value(res[3][1, 1]))
+            # cost += remaining > 0 ? -sell[k] * remaining : -buy[k] * remaining
+        end
     end
-    return b, target, status, energy_cost
+    return b, target, status, energy_cost, unserved, curtailed
 end
 
-b, target, status, energy_cost_on = run_closed_loop(true)
-b_off, _, _, energy_cost_off = run_closed_loop(false)
+b, target, status, energy_cost_on, unserved_on, curtailed_on = run_closed_loop(true)
+b_off, _, _, energy_cost_off, unserved_off, curtailed_off = run_closed_loop(false)
 RESIL.enabled = true
 
 # ---------------------------------------------------------------- checks
 Smax = Float64(b.max_storage)
 tol = 1e-3 * Smax                                  # SCS solves to about 1e-4
-ks = 2:NUM_STEPS
+ks = [k for k in 2:NUM_STEPS if !isnan(target[k])]   # states set by a scheduling solve (none after an outage step)
 gap = b.SoC[ks] .- target[ks]
 solved = all(s -> s in (MOI.OPTIMAL, MOI.ALMOST_OPTIMAL), status)
 held = minimum(gap) >= -tol
@@ -57,7 +70,9 @@ held = minimum(gap) >= -tol
         count(abs.(gap) .<= tol), length(gap))
 @printf("without resilience the SoC is below this s~ at %d of %d steps\n", count(b_off.SoC[ks] .< target[ks] .- tol), length(ks))
 @printf("total energy cost: %.2f (resilience on), %.2f (resilience off)\n", energy_cost_on, energy_cost_off)
-println(solved && held ? "PASS: single_optimise keeps the SoC at or above s~ at every step" :
+OUTAGE.enabled && @printf("outage at steps %d-%d: load not supplied %.2f (resilience on), %.2f (resilience off); PV curtailed %.2f, %.2f\n",
+                          OUTAGE.start, OUTAGE.stop, unserved_on, unserved_off, curtailed_on, curtailed_off)
+println(solved && held ? "PASS: single_optimise keeps the SoC at or above s~ at every scheduling step" :
         "FAIL: " * (solved ? "SoC fell below s~" : "a solve did not reach OPTIMAL"))
 
 # ---------------------------------------------------------------- plot
@@ -73,6 +88,7 @@ plot!(p1, hours, b_off.SoC, label = "SoC, resilience off", lw = 1.5, color = :gr
 active = [k for k in ks if abs(b.SoC[k] - target[k]) <= tol]
 scatter!(p1, hours[active], b.SoC[active], label = "floor active (SoC = s~)", color = :black, ms = 4)
 hline!(p1, [Smax], label = "capacity", color = :black, lw = 1, ls = :dashdot)
+OUTAGE.enabled && vspan!(p1, [(OUTAGE.start - 1) / 4, OUTAGE.stop / 4], color = :red, alpha = 0.08, label = "outage (no grid)")
 p2 = plot(hours, b.act_cons, label = "load (actual)", lw = 2, color = :firebrick, legend = :outertopright,
           xlabel = "hour of day", ylabel = "energy per step")
 plot!(p2, hours, b.act_prod, label = "PV (actual)", lw = 2, color = :seagreen)

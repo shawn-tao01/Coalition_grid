@@ -632,9 +632,10 @@ function coal_MPC(coal_former::Function,bs::Vector{MPC_Building}, max_coal_size:
 			if !(agent isa MPC_Building)
 				for (i,b) in enumerate(agent)
 					if k < num_steps
-						# P3.3: guard against NaN from a non-converged SCS solve
+						# P3.3: guard against NaN from a non-converged SCS solve; keep the state in [0, capacity], which SCS can
+						# overshoot within its tolerance (the next plan would then start above capacity and be infeasible)
 						next_soc = value(res[4][2,i])
-						b.SoC[k+1] = isnan(next_soc) ? b.SoC[k] : max(0, next_soc)
+						b.SoC[k+1] = isnan(next_soc) ? b.SoC[k] : clamp(next_soc, 0, Float64(b.max_storage))
 					end
 					# println(b.SoC)
 					remaining = b.act_prod[k]-b.act_cons[k]-(value(res[6][1,i]) + value(res[1][1,i]))
@@ -652,7 +653,7 @@ function coal_MPC(coal_former::Function,bs::Vector{MPC_Building}, max_coal_size:
 				b = agent
 				if k < num_steps
 					next_soc = value(res[4][2,1])
-					b.SoC[k+1] = isnan(next_soc) ? b.SoC[k] : max(0, next_soc)
+					b.SoC[k+1] = isnan(next_soc) ? b.SoC[k] : clamp(next_soc, 0, Float64(b.max_storage))
 				end
 				remaining = b.act_prod[k]-b.act_cons[k]-(value(res[6][1,1]) + value(res[1][1,1]))
 				isnan(remaining) && (remaining = 0.0)

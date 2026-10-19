@@ -704,9 +704,7 @@ end
 
 const RES_TOL = 1e-3   # reserve margins that differ by less than this count as equal
 
-# Energy exchanged inside a coalition in the first step of its plan: the sum of the members' positive coal_exch, i.e. the
-# energy they send to the other members, which equals the energy the others receive because sum(coal_exch) = 0 (coal_c).
-# No prices. A single building has no partner, so its value is 0. NaN if the solve failed.
+# Energy exchanged inside a coalition in the first step of its plan
 function first_step_compensation(var, n::Int)
     n == 1 && return 0.0
     c = [value(var[6][1, i]) for i in 1:n]
@@ -716,18 +714,13 @@ end
 # V(C) of a plan: the members' planned cost over the horizon; a failed solve counts as infinite cost
 plan_cost(var) = (v = sum(value.(var[5])); isnan(v) ? Inf : v)
 
-# Reserve margin of a coalition at step k, the resilience indicator of phase 1: the members' predicted PV plus stored
-# energy minus predicted load at step k, minus the coalition's reserve s~_C for the next tau steps (stilde_coal, entry 1).
-# > 0: energy left beyond the reserve; < 0: short of it. Data only, no plan needed.
+# Reserve margin of a coalition at step k, the resilience index 
 function reserve_margin(bs::Vector{MPC_Building}, k::Int)
     net = sum(b.pred_prod[k, 1] + b.SoC[k] - b.pred_cons[k, 1] for b in bs)
     return net - stilde_coal(bs, k, 1, RESIL.tau)[1]
 end
 
-# Reachable margin of a coalition (method B): at each horizon step j = 2..H, the most total energy its batteries can hold
-# when charging at full power from now on, minus the reserve s~_C required there (resil_floor); the worst step of the
-# window. With the grid, charging at full power is always possible, so the coalition's problem is feasible if and only
-# if this is >= 0. Data only, no plan needed. Inf when there is no reserve constraint.
+# Reachable margin of a coalition 
 function reach_margin(bs::Vector{MPC_Building}, k::Int, H::Int)
     (!RESIL.enabled || H < 2) && return Inf
     st = stilde_coal(bs, k, H, RESIL.tau)          # st[j]: reserve at horizon step j (j = 1 is step k)
@@ -735,8 +728,8 @@ function reach_margin(bs::Vector{MPC_Building}, k::Int, H::Int)
                        for b in bs) - st[j] for j in 2:H)
 end
 
-# Resilience value used to rank coalitions: the worse of the reserve margin now and the reachable margin over the window
-resilience_value(bs::Vector{MPC_Building}, k::Int, H::Int) = min(reserve_margin(bs, k), reach_margin(bs, k, H))
+# Resilience value used to rank coalitions, -Inf if the reserve cannot be reached (r < 0), so an agent without a feasible plan is merged first by any feasible merge
+resilience_value(bs::Vector{MPC_Building}, k::Int, H::Int) = (r = reach_margin(bs, k, H); r < -RES_TOL ? -Inf : min(reserve_margin(bs, k), r))
 
 """
     resilience_focussed_coals(buildings, max_coal_size, k, num_look_ahead, receding_horizon=false)
@@ -818,8 +811,7 @@ function resilience_focussed_coals(buildings::Vector{MPC_Building}, max_coal_siz
         end
     end
 
-    # (22) 解散检查, only where dissolving does not lower resilience: a coalition whose members alone all have at least its
-    # margin is dissolved if its first-step cost is above that of its members alone
+    # dissolves coalitions whose joint first-step cost exceeds the members acting alone
     final_agents = Vector{Any}()
     for a in agents
         if !outage && length(agent_ids(a)) > 1 && minimum(plans[i][2] for i in a) >= plans[a][2] - RES_TOL &&

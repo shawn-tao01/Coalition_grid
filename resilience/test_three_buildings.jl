@@ -5,7 +5,7 @@ include(joinpath(@__DIR__, "..", "Coalition.jl"))
 include(joinpath(@__DIR__, "..", "load_EMS_data.jl"))
 using Plots, Printf
 
-# Candidates. Day 1, outage 05:00-12:00
+# Candidates
 #   [7, 19, 20]  
 #   [19, 20, 13] 
 #   [4, 7, 19]  
@@ -120,9 +120,9 @@ end
 warmup()
 
 results = [
-    run_case("decentralised, resilience off", decentralised; enabled = false),   # reference for cost and shedding
-    # run_case("as published, resilience off", privacy_focussed_coals; enabled = false),
-    run_case("resilience first, proactive", resilience_focussed_coals; enabled = true)
+    run_case("decentralised, no reserve", decentralised; enabled = false),   # reference for cost and shedding
+    # run_case("as published, no reserve", privacy_focussed_coals; enabled = false),
+    run_case("resilience, with reserve", resilience_focussed_coals; enabled = true)
 ]
 FORM.order, FORM.exact_bound, FORM.fix_dissolve = :paper, false, false   # back to the defaults
 checks = [assess(r) for r in results]
@@ -135,53 +135,53 @@ open(table_file, "w") do io
     @printf(io, "%-32s %8s | %8s %9s | %10s %9s %6s | %s\n", "case", "cost", "shed", "curtailed",
             "t_mean (s)", "t_max (s)", "solves", "not OPTIMAL")
     for (r, (viol, _)) in zip(results, checks)
-        r.resil && (viol > 0 || r.bad > 0) && (global ok = false)
+        startswith(r.label, "resilience") && (viol > 0 || r.bad > 0) && (global ok = false)
         @printf(io, "%-32s %8.2f | %8.2f %9.2f | %10.3f %9.3f %6.1f | %4d of %4d\n", r.label, r.cost,
                 r.shed, r.curt, sum(r.step_time) / NUM_STEPS, maximum(r.step_time), r.solves_per_step, 
                 r.bad, r.solves)
     end
     println(io)
     for (col, text) in [
-            "cost"        => "realised grid cost of the day",
-            "shed"        => "load not supplied during the outage, summed over buildings and steps",
-            "curtailed"   => "generation curtailed during the outage, summed over buildings and steps",
-            "t_mean (s)"  => "wall time of the coalition formation at one step, the mean over the $(NUM_STEPS) steps",
+            "cost"        => "realised grid cost",
+            "shed"        => "shedded load summed over buildings and steps",
+            "curtailed"   => "generation curtailed, summed over buildings and steps",
+            "t_mean (s)"  => "wall time of the coalition formation, the mean over the $(NUM_STEPS) steps",
             "t_max (s)"   => "the slowest of the $(NUM_STEPS) steps",
-            "solves"      => "optimisation problems solved at one step, mean over the $(NUM_STEPS) steps (so there is decimal)",
-            "not OPTIMAL" => "applied plans (one per coalition per step) whose solver status is neither OPTIMAL nor ALMOST_OPTIMAL, out of all applied plans"]
+            "solves"      => "optimisation problems solved at one step, mean over the $(NUM_STEPS) steps",
+            "not OPTIMAL" => "steps when solver status is neither OPTIMAL nor ALMOST_OPTIMAL"]
         @printf(io, "%-13s%s\n", col * ":", text)
     end
     OUTAGE.enabled && println(io, "outage at steps $(OUTAGE.start)-$(OUTAGE.stop)")
-    println(io, ok ? "PASS" : "FAIL: a proactive run had a failed solve or a coalition below s~C")
+    println(io, "Cmax $(CMAX), buildings ", join(IDS, ", "))
+    println(io, ok ? "PASS" : "FAIL: the coalition run had a failed solve or a coalition below s~C")
 end
 println("saved ", table_file)
 
-# ---------------------------------------------------------------- which solves failed
-"""
-Re-solve the problem behind the failed plan `f` of run `r`.
-"""
-function diagnose(r, f; soft = (:resil_floor,), rho = 100.0)
-    RESIL.enabled = r.resil
-    model, _ = single_optimise(opt, r.bs[f.members], f.k, H)
-    pen = relax_with_penalty!(model, Dict(c => rho for g in soft for c in model[g]))
-    optimize!(model)
-    @printf("   re-solved with %s soft: %s\n", join(soft, ", "), termination_status(model))
-    for (c, p) in sort(collect(pen), by = x -> name(x[1]))
-        value(p) > 1e-4 && @printf("      %-18s violated by %.4f\n", name(c), value(p))   # value(p) is the violation itself
-    end
-end
+# """
+# Re-solve the problem behind the failed plan `f` of run `r`.
+# """
+# function diagnose(r, f; soft = (:resil_floor,), rho = 100.0)
+#     RESIL.enabled = r.resil
+#     model, _ = single_optimise(opt, r.bs[f.members], f.k, H)
+#     pen = relax_with_penalty!(model, Dict(c => rho for g in soft for c in model[g]))
+#     optimize!(model)
+#     @printf("   re-solved with %s soft: %s\n", join(soft, ", "), termination_status(model))
+#     for (c, p) in sort(collect(pen), by = x -> name(x[1]))
+#         value(p) > 1e-4 && @printf("      %-18s violated by %.4f\n", name(c), value(p))   # value(p) is the violation itself
+#     end
+# end
 
-for (r, ch) in zip(results, checks)
-    r.resil && (r.bad > 0 || ch[1] > 0) || continue
-    println("\n", r.label, ":")
-    for f in r.fails
-        @printf("   k = %2d  %-8s  solve ended %s (primal %s)\n", f.k, string(f.members), f.status, f.primal)
-    end
-    for b in ch[2]
-        @printf("   k = %2d  %-8s  total energy at k+1 is %.4f below s~C\n", b.k, string(b.members), -b.gap)
-    end
-    isempty(r.fails) || diagnose(r, first(r.fails))   # others: diagnose(results[i], results[i].fails[j]; soft = (...))
-end
+# for (r, ch) in zip(results, checks)
+#     startswith(r.label, "resilience") && (r.bad > 0 || ch[1] > 0) || continue
+#     println("\n", r.label, ":")
+#     for f in r.fails
+#         @printf("   k = %2d  %-8s  solve ended %s (primal %s)\n", f.k, string(f.members), f.status, f.primal)
+#     end
+#     for b in ch[2]
+#         @printf("   k = %2d  %-8s  total energy at k+1 is %.4f below s~C\n", b.k, string(b.members), -b.gap)
+#     end
+#     isempty(r.fails) || diagnose(r, first(r.fails))   # others: diagnose(results[i], results[i].fails[j]; soft = (...))
+# end
 
 # ---------------------------------------------------------------- plot
 hours = (0:NUM_STEPS-1) ./ 4
@@ -190,11 +190,18 @@ colours = (:gray, :black, :royalblue)
 # start and end of the outage, as vertical red dashed lines (start of step OUTAGE.start, end of step OUTAGE.stop)
 outage_lines!(p; label = "") = OUTAGE.enabled &&
     vline!(p, [(OUTAGE.start - 1) / 4, OUTAGE.stop / 4], color = :red, ls = :dash, lw = 1.5, label = label)
+# stored energy of building i in run r; a decentralised run is drawn only up to its first step without a plan
+function curve(r, i)
+    soc = copy(r.bs[i].SoC)
+    ks = [f.k for f in r.fails if i in f.members]
+    startswith(r.label, "decentralised") && !isempty(ks) && (soc[first(ks)+1:end] .= NaN)
+    return soc
+end
 panels = Any[]
 for i in eachindex(IDS)
     p = plot(title = NAMES[i], ylabel = "energy", legend = i == 1 ? :topright : false)
     for (j, col) in zip(on, colours)
-        plot!(p, hours, results[j].bs[i].SoC, label = "proactive scheduling", lw = 2, color = col, linetype = :steppost)
+        plot!(p, hours, curve(results[j], i), label = "proactive scheduling", lw = 2, color = col, linetype = :steppost)
     end
     b = results[on[1]].bs[i]   # own floor (what the building must hold alone); none is set by an outage step
     own = [k == 1 || in_outage(k - 1) ? NaN : stilde_coal([b], k - 1, 1, RESIL.tau)[2] for k in 1:NUM_STEPS]
@@ -227,7 +234,7 @@ savefig(fig, joinpath(outdir, "three_buildings.png"))
 savefig(fig, joinpath(outdir, "three_buildings.pdf"))
 println("saved ", joinpath(outdir, "three_buildings.png"), " and .pdf")
 
-# load and generation of the three buildings
+# load and generation of the buildings
 let script = joinpath(@__DIR__, "plot_buildings.py"),
     python = something(Sys.which("python"), Sys.which("py"), "python"),
     args = ["-b", string.(IDS)..., "--outdir", outdir, "--format", "png", "pdf"]
