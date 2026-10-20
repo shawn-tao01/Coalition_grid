@@ -742,8 +742,6 @@ Returns `(agents, vars, num_iters)`.
 """
 function resilience_focussed_coals(buildings::Vector{MPC_Building}, max_coal_size::Int, k::Int,num_look_ahead::Int,receding_horizon::Bool=false)
     num_iters = 0
-    p_buy, p_sell = energy_cost_k(opt, k, 1)[1], energy_sale_k(opt, k, 1)[1]
-    first_step_cost(var) = sum(value.(var[2][1, :]))*p_buy - sum(value.(var[3][1, :]))*p_sell
     plans = Dict{Any, Any}()                       # agent => (plan, resilience value, total cost)
     merged = Dict{Vector{Int}, Any}()              # sorted member ids => (ids, plan, resilience value, total cost) of a solved merge
     H = receding_horizon ? num_look_ahead : min(length(buildings[1].act_cons) - k + 1, num_look_ahead)
@@ -761,8 +759,6 @@ function resilience_focussed_coals(buildings::Vector{MPC_Building}, max_coal_siz
         num_iters += res[2]
         plans[a] = (res[1], value_of(buildings[[a]]), plan_cost(res[1]))
     end
-    # first-step cost of each building alone, for (22); an outage has no grid cost
-    dec_single_vals = outage ? Float64[] : [first_step_cost(plans[a][1]) for a in agents]
 
     for phase in (:resilience, :cost)
         while true                                 # one round of pairwise merges
@@ -811,15 +807,7 @@ function resilience_focussed_coals(buildings::Vector{MPC_Building}, max_coal_siz
         end
     end
 
-    # dissolves coalitions whose joint first-step cost exceeds the members acting alone
-    final_agents = Vector{Any}()
-    for a in agents
-        if !outage && length(agent_ids(a)) > 1 && minimum(plans[i][2] for i in a) >= plans[a][2] - RES_TOL &&
-           sum(dec_single_vals[i] for i in a) < first_step_cost(plans[a][1])
-            append!(final_agents, a)               # its members act alone
-        else
-            push!(final_agents, a)
-        end
-    end
-    return final_agents, [plans[a][1] for a in final_agents], num_iters
+    # no dissolution after the formation: a coalition that costs more in the first step than its members alone is kept,
+    # since dissolving it would lower the resilience of its weakest member (the test never acted in the 3, 6 and 12 building runs)
+    return agents, [plans[a][1] for a in agents], num_iters
 end

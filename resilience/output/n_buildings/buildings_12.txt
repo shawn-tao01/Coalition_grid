@@ -1,6 +1,6 @@
 case                                 cost |     shed curtailed | t_mean (s) t_max (s) solves | not OPTIMAL
-decentralised, with reserve       -508.00 |   950.20   4171.94 |      0.063     0.144   12.0 |  116 of 1152
-resilience, with reserve          -437.90 |   331.03   3410.53 |      0.622     0.991   86.7 |    0 of  350
+decentralised, with reserve       -502.29 |   906.31   4207.38 |      0.078     0.162   12.0 |  124 of 1152
+resilience, with reserve          -437.79 |   307.71   3300.85 |      1.312     2.739   86.0 |    0 of  337
 
 cost:        realised grid cost
 shed:        shedded load summed over buildings and steps
@@ -12,10 +12,10 @@ not OPTIMAL: steps when solver status is neither OPTIMAL nor ALMOST_OPTIMAL
 outage at steps 49-72
 Cmax 4, buildings 4, 5, 7, 8, 9, 13, 14, 19, 20, 21, 22, 25
 PASS
-  building 4   failed alone at 23 steps, first 18:00 | coalition run: failed 0, not reachable alone 49, covered 49
-  building 5   failed alone at 23 steps, first 18:00 | coalition run: failed 0, not reachable alone 41, covered 41
-  building 7   failed alone at 13 steps, first 18:00 | coalition run: failed 0, not reachable alone 19, covered 19
-  building 8   failed alone at 15 steps, first 18:00 | coalition run: failed 0, not reachable alone 20, covered 20
-  building 9   failed alone at 18 steps, first 18:00 | coalition run: failed 0, not reachable alone 20, covered 20
+  building 4   failed alone at 23 steps, first 18:00 | coalition run: failed 0, not reachable alone 46, covered 46
+  building 5   failed alone at 23 steps, first 18:00 | coalition run: failed 0, not reachable alone 42, covered 42
+  building 7   failed alone at 14 steps, first 18:00 | coalition run: failed 0, not reachable alone 21, covered 21
+  building 8   failed alone at 22 steps, first 18:00 | coalition run: failed 0, not reachable alone 21, covered 21
+  building 9   failed alone at 18 steps, first 18:00 | coalition run: failed 0, not reachable alone 24, covered 24
   building 13  failed alone at  1 steps, first 05:00 | coalition run: failed 0, not reachable alone  0, covered  0
   building 22  failed alone at 23 steps, first 18:00 | coalition run: failed 0, not reachable alone 32, covered 32

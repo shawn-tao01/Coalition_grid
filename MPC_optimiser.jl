@@ -157,8 +157,10 @@ function single_optimise(opt::MPC_optimiser,bs::Vector{MPC_Building},k::Int,num_
 	# println(init_charge_mat)
 	@constraint(model, charge_c, charge .== charge_mat*charge+charge_mat*(pos_delta_s.*charge_eff_vec')+charge_mat*(neg_delta_s.*discharge_eff_vec')+init_charge_mat)
 
-	@constraint(model, final_delta_c, delta_s[num_steps, :] >= -charge[num_steps, :])
-	
+	# (10e) at k = K: the stored energy after the last step of the horizon stays in [0, capacity]
+	@constraint(model, soc_end_c[b = 1:num_builds], 0 <= charge[num_steps, b] + charge_eff_vec[b]*pos_delta_s[num_steps, b] +
+	                                                 discharge_eff_vec[b]*neg_delta_s[num_steps, b] <= capacities[num_steps, b])
+
 	consumps = reduce(hcat, [pred_consumption(b,k,num_steps) for b in bs])
 	prods = reduce(hcat,[pred_production(b,k,num_steps) for b in bs])
 	@constraint(model, power_c, consumps+grid_sell+delta_s+coal_exch.==prods+grid_cons)
@@ -230,7 +232,9 @@ function single_optimise_outage(opt::MPC_optimiser,bs::Vector{MPC_Building},k::I
 	init_charge_mat = vcat([b.SoC[k] for b in bs]',zeros(num_steps-1,num_builds))
 	@constraint(model, charge_c, charge .== charge_mat*charge+charge_mat*(pos_delta_s.*charge_eff_vec')+charge_mat*(neg_delta_s.*discharge_eff_vec')+init_charge_mat)
 
-	@constraint(model, final_delta_c, delta_s[num_steps, :] >= -charge[num_steps, :])
+	# (10e) at k = K, as in single_optimise
+	@constraint(model, soc_end_c[b = 1:num_builds], 0 <= charge[num_steps, b] + charge_eff_vec[b]*pos_delta_s[num_steps, b] +
+	                                                 discharge_eff_vec[b]*neg_delta_s[num_steps, b] <= capacities[num_steps, b])
 
 	@constraint(model, power_c, served_cons+delta_s+coal_exch.==used_prod)   # (21): no grid_cons, grid_sell
 
