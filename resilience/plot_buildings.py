@@ -8,9 +8,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE.parent / "synthetic_data" / "cleaned_data"
-STEPS_PER_DAY = 96  # 15-min steps
+STEPS_PER_DAY = 96
 
-# generate_synthetic_data.jl: 10 archetypes x 3 instances, in this order, so ids 1-3 are solar farms, ...
 ARCHETYPES = ["solar farm", "office", "residential", "industrial", "warehouse pv",
               "data center", "school", "restaurant", "coastal wind", "hilltop wind"]
 INSTANCES = 3
@@ -39,10 +38,9 @@ def read_building(bid, first_row, n_rows):
 def plot_building(plt, bid, data, first_row, args):
     gen = "wind generation" if archetype(bid) in WIND else "PV generation"
     n = len(data["actual_consumption_mean"])
-    hours = [(first_row + i) / 4 for i in range(n)]  # hours from 00:00 of day 1
+    hours = [(first_row + i) / 4 for i in range(n)]
 
     fig, ax = plt.subplots(figsize=(11, 3.8))
-    # each value holds over its 15-min step, as :steppost in the Julia plots
     ax.step(hours, data["actual_consumption_mean"], where="post", color="firebrick", lw=1.8, label="load")
     ax.step(hours, data["actual_pv_mean"], where="post", color="seagreen", lw=1.8, label=gen)
     if args.forecast:
@@ -50,14 +48,14 @@ def plot_building(plt, bid, data, first_row, args):
                 label="load forecast")
         ax.step(hours, data["pv_00_mean"], where="post", color="seagreen", lw=1, ls="--", alpha=0.7,
                 label="generation forecast")
-    if args.outage:  # start of step START and end of step STOP, as in test_three_buildings.jl
+    if args.outage:
         start, stop = args.outage
         for i, x in enumerate([(start - 1) / 4, stop / 4]):
             ax.axvline(x, color="red", ls="--", lw=1.5, label="outage start / end" if i == 0 else None)
 
     first_day = first_row // STEPS_PER_DAY + 1
     last_day = (first_row + n - 1) // STEPS_PER_DAY + 1
-    for d in range(first_day, last_day):  # day boundaries
+    for d in range(first_day, last_day):
         ax.axvline(d * 24, color="gray", lw=0.8, ls=":")
     step = 5 if last_day == first_day else 12
     ax.set_xticks(range(int(hours[0]), int(hours[-1]) + 2, step))
@@ -93,7 +91,7 @@ def main():
 
     import matplotlib
     if not args.show:
-        matplotlib.use("Agg")  # save only, no window needed
+        matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     first_row = (args.start_day - 1) * STEPS_PER_DAY

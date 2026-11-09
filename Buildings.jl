@@ -23,10 +23,10 @@ discharge_eff(b::Building) = b.discharge_eff
 
 struct MPC_Building <: Player
 	loc::Tuple
-	pred_cons::Matrix{Float64} # 96x96 matrix of predicted consumption for each timestep and lookahead
-	pred_prod::Matrix{Float64} # 96x96 matrix of predicted production for each timestep and lookahead
-	act_cons::Vector{Float64}  # 96*1 vector of actual consumption for each timestep
-	act_prod::Vector{Float64}  # 96*1 vector of actual production for each timestep 
+	pred_cons::Matrix{Float64}
+	pred_prod::Matrix{Float64}
+	act_cons::Vector{Float64}
+	act_prod::Vector{Float64}
 	max_storage::Float16
 	storage_max_flow::Float16
 	charge_eff::Float16
@@ -44,6 +44,3 @@ max_store(b::MPC_Building) = b.max_storage
 max_flow(b::MPC_Building) = b.storage_max_flow
 charge_eff(b::MPC_Building) = b.charge_eff
 discharge_eff(b::MPC_Building) = b.discharge_eff
-
-
-

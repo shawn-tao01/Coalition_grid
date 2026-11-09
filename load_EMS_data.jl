@@ -11,11 +11,10 @@ include("Buildings.jl")
 
 max_builds = 70
 
-#println(meta)
-
+# MPC buildings with their forecasts, the buy and sell prices and the timestamps
 function MPC_load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
     dd = data_dir
-    meta = CSV.read(joinpath(dd, "synthetic_data/data/metadata.csv"), DataFrame) #30*6 each 6 feature has 30 datas
+    meta = CSV.read(joinpath(dd, "synthetic_data/data/metadata.csv"), DataFrame)
     mb = nrow(meta)
     if num_builds < 1
         num_builds = 1
@@ -92,7 +91,6 @@ function load_from_CSV(num_builds::Int, num_steps::Int, data_dir::String="")
             break
         end
     end
-    # println(start_ind)
     buy = collect(price_file[start_ind:start_ind+95,:buy])
     sell = collect(price_file[start_ind:start_ind+95,:sell])
 
@@ -131,8 +129,6 @@ function clean_data(start_t::Int,num_steps::Int)
         CSV.write(cleaned_filename, master)
     end
 end
-
-
 
 function find_starts(num_steps::Int)
 
@@ -199,8 +195,6 @@ function check_start_end()
         filename = "synthetic_data/data/"*string(i)*".csv"
         file = CSV.read(filename, DataFrame, delim=";")
         num_builds = max_builds
-        #Currently, use only predicted data from day 1, site loc is randomly assigned,
-        # battery power and charge efficiencies stored but not implemented
         start = DateTime.(split(file[1,:timestamp],"+")[1])
         endT = DateTime.(split(file[nrow(file),:timestamp],"+")[1])
         if max_start==0
@@ -213,15 +207,8 @@ function check_start_end()
         elseif endT < min_end
             min_end = endT
         end
-        #println(file[1,:timestamp])
-        # build = MPC_Building((rand(Float64, 1)[1], rand(Float64, 1)[1]), Matrix(file[1:num_steps, Cols(x -> startswith(x, "load_"))]), Matrix(file[1:num_steps, Cols(x -> startswith(x, "pv_"))]), CSV.File(filename; select=[4]).actual_consumption[1:num_steps], CSV.File(filename; select=[5]).actual_pv[1:num_steps], meta[i,:capacity], meta[i,:power], meta[i,:charge_efficiency],meta[i,:discharge_efficiency],i,zeros(num_steps))
-        # push!(builds, build)
-        #println(collect(file[1, Cols(x -> startswith(x, "load_"))]))
     end
     println(max_start)
     println(min_end)
-    # price_file = CSV.read("synthetic_data/data/edf_prices.csv", DataFrame)
-    # buy = collect(price_file[1:96,:buy])
-    # sell = collect(price_file[1:96,:sell])
 
 end
